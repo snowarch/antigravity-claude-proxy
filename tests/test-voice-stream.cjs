@@ -101,6 +101,13 @@ function runWsOverSocket(socket, hostHeader, urlPath, pcmChunk) {
                 if (idx === -1) return;
                 const hdr = rawBuf.subarray(0, idx).toString('utf8');
                 assert.match(hdr, /^HTTP\/1\.1 101 Switching Protocols/i);
+                const acceptMatch = hdr.match(/^Sec-WebSocket-Accept:\s*(.+)$/im);
+                assert.ok(acceptMatch, 'Missing Sec-WebSocket-Accept header');
+                const expectedAccept = crypto
+                    .createHash('sha1')
+                    .update(wsKey + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+                    .digest('base64');
+                assert.equal(acceptMatch[1].trim(), expectedAccept, 'Sec-WebSocket-Accept must match RFC 6455 GUID');
                 upgraded = true;
                 rawBuf = rawBuf.subarray(idx + 4);
 
@@ -361,7 +368,7 @@ async function runTests() {
                 sock.once('connect', resolve);
                 sock.once('error', reject);
             });
-            const wsKey = crypto.randomBytes(16).toString('base64');
+            const wsKey = 'dGhlIHNhbXBsZSBub25jZQ==';
             const upgradeReq = Buffer.from([
                 `GET ${VOICE_STREAM_PATH}?encoding=linear16&sample_rate=16000&channels=1 HTTP/1.1`,
                 `Host: 127.0.0.1:${port}`,
@@ -387,7 +394,9 @@ async function runTests() {
                     if (!upgraded) {
                         const idx = rawBuf.indexOf('\r\n\r\n');
                         if (idx === -1) return;
-                        assert.match(rawBuf.subarray(0, idx).toString('utf8'), /^HTTP\/1\.1 101 Switching Protocols/i);
+                        const hdr = rawBuf.subarray(0, idx).toString('utf8');
+                        assert.match(hdr, /^HTTP\/1\.1 101 Switching Protocols/i);
+                        assert.match(hdr, /^Sec-WebSocket-Accept:\s*s3pPLMBiTxaQ9kYGzzhZRbK\+xOo=$/im);
                         upgraded = true;
                         rawBuf = rawBuf.subarray(idx + 4);
                     }
@@ -454,13 +463,58 @@ async function runTests() {
             rawSocket.destroy();
             console.log('PASS: GET /api/hello over intercepted TLS tunnel');
         }
+
+        // 11. Standard runtime WebSocket client (undici/RFC 6455 strict handshake + framing)
+        {
+            assert.equal(typeof globalThis.WebSocket, 'function', 'Node runtime must provide globalThis.WebSocket');
+            const messages = await new Promise((resolve, reject) => {
+                const ws = new globalThis.WebSocket(
+                    `ws://127.0.0.1:${port}${VOICE_STREAM_PATH}?encoding=linear16&sample_rate=16000&channels=1&language=es`
+                );
+                const received = [];
+                const t = setTimeout(() => {
+                    ws.close();
+                    reject(new Error(`Standard WebSocket test timed out. Received: ${JSON.stringify(received)}`));
+                }, 5000);
+
+                ws.addEventListener('open', () => {
+                    ws.send(JSON.stringify({ type: 'KeepAlive' }));
+                    ws.send(buildTonePcm(0.4));
+                    ws.send(JSON.stringify({ type: 'CloseStream' }));
+                });
+                ws.addEventListener('message', (event) => {
+                    const msg = JSON.parse(String(event.data));
+                    received.push(msg);
+                    if (msg.type === 'TranscriptEndpoint' || msg.type === 'TranscriptError') {
+                        ws.close(1000, 'done');
+                    }
+                });
+                ws.addEventListener('close', (event) => {
+                    clearTimeout(t);
+                    if (event.code !== 1000) {
+                        reject(new Error(`Unexpected close code ${event.code}: ${event.reason}`));
+                        return;
+                    }
+                    resolve(received);
+                });
+                ws.addEventListener('error', (event) => {
+                    clearTimeout(t);
+                    reject(event.error || new Error(event.message || 'WebSocket error'));
+                });
+            });
+
+            assert.deepEqual(messages.map(m => m.type), ['TranscriptInterim', 'TranscriptText', 'TranscriptEndpoint']);
+            assert.equal(messages[1].data, 'Probando transcripcion por voz.');
+            assert.equal(capturedRequests.length, 4);
+            console.log('PASS: standard runtime globalThis.WebSocket end-to-end');
+        }
     } finally {
         server.closeAllConnections?.();
         await new Promise((resolve) => server.close(resolve));
         fs.rmSync(tempCertDir, { recursive: true, force: true });
     }
 
-    console.log('All 11 voice stream tests passed');
+    console.log('All 12 voice stream tests passed');
 }
 
 runTests()

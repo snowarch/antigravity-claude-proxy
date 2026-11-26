@@ -6,7 +6,7 @@
 import crypto from 'crypto';
 import { EventEmitter } from 'events';
 
-const WS_GUID = '258EAFA5-E914-47CF-A5D0-C5496505677A';
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_FRAME_PAYLOAD_BYTES = 8 * 1024 * 1024; // 8 MiB safety cap per frame
 
 const OPCODE_CONTINUATION = 0x0;
