@@ -6,7 +6,8 @@
 // Initialize proxy support BEFORE any other imports that may use fetch
 import './utils/proxy.js';
 
-import app, { accountManager } from './server.js';
+import app, { accountManager, ensureInitialized } from './server.js';
+import { attachVoiceAndTunnel } from './voice/https-tunnel.js';
 import { DEFAULT_PORT } from './constants.js';
 import { logger } from './utils/logger.js';
 import { config } from './config.js';
@@ -152,6 +153,15 @@ ${environmentSection}
         logger.warn('Running in DEVELOPER mode - verbose logs enabled');
     }
 });
+
+const { caPath: voiceCaPath } = attachVoiceAndTunnel(server, {
+    app,
+    accountManager,
+    ensureInitialized
+});
+if (voiceCaPath) {
+    logger.info(`[Voice] Speech-to-text WebSocket ready (CA cert: ${voiceCaPath})`);
+}
 
 // Graceful shutdown
 const shutdown = () => {

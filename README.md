@@ -7,6 +7,7 @@ Anthropic-compatible local proxy backed by Google Cloud Code (Antigravity). Keep
 ## What this fork adds
 
 - **Native `WebSearch`**: maps Anthropic `web_search_*` server tools to Google Search grounding (`{ googleSearch: {} }`), resolves Vertex AI redirect URLs, and returns `server_tool_use` + `web_search_tool_result` blocks in both streaming and non-streaming modes. No MCP server needed.
+- **Native `/voice` dictation**: implements `/api/ws/speech_to_text/voice_stream` (backed by Cloud Code Gemini audio transcription) plus a localhost-only `CONNECT` tunnel for `api.anthropic.com:443` with an auto-generated local CA (`~/.config/antigravity-proxy/certs/ca.pem`).
 - **Isolated setup**: separate `CLAUDE_CONFIG_DIR` (`~/.claude-account-antigravity`) and wrapper command (`claude-antigravity`) so `~/.claude` stays clean for official Anthropic usage.
 
 ## 1. Install and start the proxy
@@ -72,10 +73,14 @@ Create `~/.local/bin/claude-antigravity` (make sure `~/.local/bin` is in `PATH`)
 ```bash
 #!/usr/bin/env bash
 exec env \
+  -u ANTHROPIC_AUTH_TOKEN \
   CLAUDE_CONFIG_DIR="$HOME/.claude-account-antigravity" \
   ANTHROPIC_BASE_URL="http://localhost:8080" \
-  ANTHROPIC_AUTH_TOKEN="test" \
+  CLAUDE_CODE_OAUTH_TOKEN="antigravity-proxy" \
   CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \
+  HTTPS_PROXY="http://localhost:8080" \
+  NO_PROXY="localhost,127.0.0.1" \
+  NODE_EXTRA_CA_CERTS="$HOME/.config/antigravity-proxy/certs/ca.pem" \
   claude "$@"
 ```
 
@@ -87,7 +92,7 @@ chmod +x ~/.local/bin/claude-antigravity
 
 ```bash
 # ~/.bashrc or ~/.zshrc
-alias claude-antigravity='CLAUDE_CONFIG_DIR="$HOME/.claude-account-antigravity" ANTHROPIC_BASE_URL="http://localhost:8080" ANTHROPIC_AUTH_TOKEN="test" CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 command claude'
+alias claude-antigravity='env -u ANTHROPIC_AUTH_TOKEN CLAUDE_CONFIG_DIR="$HOME/.claude-account-antigravity" ANTHROPIC_BASE_URL="http://localhost:8080" CLAUDE_CODE_OAUTH_TOKEN="antigravity-proxy" CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 HTTPS_PROXY="http://localhost:8080" NO_PROXY="localhost,127.0.0.1" NODE_EXTRA_CA_CERTS="$HOME/.config/antigravity-proxy/certs/ca.pem" claude'
 ```
 
 ### Isolated settings file
@@ -104,14 +109,20 @@ Create `~/.claude-account-antigravity/settings.json` with your model mapping:
   },
   "env": {
     "ANTHROPIC_BASE_URL": "http://localhost:8080",
-    "ANTHROPIC_AUTH_TOKEN": "test",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-5-5",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5-5",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-5-5",
     "CLAUDE_CODE_SUBAGENT_MODEL": "claude-sonnet-5-5"
-  }
+  },
+  "voice": {
+    "enabled": true,
+    "mode": "hold"
+  },
+  "voiceEnabled": true
 }
 ```
+
+> Use `VOICE_MODEL` in the proxy environment to override the default transcription model (`gemini-3.8-flash-low`). On Linux, `/voice` requires `arecord` (ALSA/PipeWire) or `sox`.
 
 Use `claude` for your official Anthropic account and `claude-antigravity` for this proxy.
 

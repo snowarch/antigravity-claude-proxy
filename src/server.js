@@ -52,7 +52,7 @@ let initPromise = null;
 /**
  * Ensure account manager is initialized (with race condition protection)
  */
-async function ensureInitialized() {
+export async function ensureInitialized() {
     if (isInitialized) return;
 
     // If initialization is already in progress, wait for it
@@ -123,6 +123,9 @@ usageStats.setupMiddleware(app);
  * Using app.use instead of app.post for earlier middleware interception
  */
 app.use((req, res, next) => {
+    if (req.path === '/api/hello') {
+        return res.status(200).json({ status: 'ok' });
+    }
     if (req.method === 'POST' && req.path === '/api/event_logging/batch') {
         return res.status(200).json({ status: 'ok' });
     }
