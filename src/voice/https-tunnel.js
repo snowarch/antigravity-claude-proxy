@@ -118,9 +118,9 @@ export function ensureVoiceCertificates(certDir = getCertDir()) {
     };
 }
 
-function isLoopbackAddress(addr) {
+export function isLoopbackAddress(addr) {
     if (!addr) return false;
-    return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+    return addr === '::1' || addr.startsWith('127.') || addr.startsWith('::ffff:127.');
 }
 
 function parseConnectAuthority(rawUrl) {
@@ -234,8 +234,13 @@ export function attachVoiceAndTunnel(httpServer, {
 
     const interceptServer = createInterceptServer({ app, voiceDeps });
 
-    // Direct WebSocket upgrade on http://localhost:PORT/api/ws/speech_to_text/voice_stream
+    // Direct WebSocket upgrade on http://localhost:PORT/api/ws/speech_to_text/voice_stream (loopback-only)
     httpServer.on('upgrade', (req, socket, head) => {
+        if (!isLoopbackAddress(socket.remoteAddress)) {
+            socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+            socket.destroy();
+            return;
+        }
         const pathname = new URL(req.url || '/', 'http://localhost').pathname;
         if (pathname === VOICE_STREAM_PATH) {
             handleVoiceStreamUpgrade(req, socket, head, voiceDeps);
@@ -279,6 +284,9 @@ export function attachVoiceAndTunnel(httpServer, {
             tlsSocket.on('close', () => {
                 if (!clientSocket.destroyed) clientSocket.destroy();
             });
+            clientSocket.on('error', () => {
+                if (!tlsSocket.destroyed) tlsSocket.destroy();
+            });
             clientSocket.on('close', () => {
                 if (!tlsSocket.destroyed) tlsSocket.destroy();
             });
@@ -288,7 +296,13 @@ export function attachVoiceAndTunnel(httpServer, {
         }
 
         // Raw TCP passthrough tunnel for all other hosts (zero TLS interception)
+        let tunnelEstablished = false;
         const upstream = net.connect(target.port, target.host, () => {
+            tunnelEstablished = true;
+            if (clientSocket.destroyed || !clientSocket.writable) {
+                upstream.destroy();
+                return;
+            }
             clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
             if (head && head.length > 0) {
                 upstream.write(head);
@@ -299,7 +313,9 @@ export function attachVoiceAndTunnel(httpServer, {
 
         upstream.on('error', () => {
             if (!clientSocket.destroyed) {
-                clientSocket.write('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n');
+                if (!tunnelEstablished && clientSocket.writable) {
+                    clientSocket.write('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n');
+                }
                 clientSocket.destroy();
             }
         });

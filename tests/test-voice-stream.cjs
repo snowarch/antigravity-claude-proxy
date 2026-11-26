@@ -135,7 +135,7 @@ function runWsOverSocket(socket, hostHeader, urlPath, pcmChunk) {
 
 async function runTests() {
     const { pcmToWav, hasSpeechEnergy, resolveVoiceModel, cleanTranscript, VOICE_STREAM_PATH } = await import('../src/voice/voice-stream.js');
-    const { attachVoiceAndTunnel } = await import('../src/voice/https-tunnel.js');
+    const { attachVoiceAndTunnel, isLoopbackAddress } = await import('../src/voice/https-tunnel.js');
 
     // 1. pcmToWav builds a valid 44-byte RIFF/WAVE header
     {
@@ -167,12 +167,27 @@ async function runTests() {
         console.log('PASS: resolveVoiceModel priority and override');
     }
 
-    // 4. cleanTranscript strips quotes and silence markers
+    // 4. cleanTranscript strips quotes (ASCII & Unicode) and silence markers
     {
         assert.equal(cleanTranscript('  "Hola mundo"  '), 'Hola mundo');
+        assert.equal(cleanTranscript('  “Hola mundo”  '), 'Hola mundo');
         assert.equal(cleanTranscript('[silence]'), '');
+        assert.equal(cleanTranscript('[Silence.]'), '');
+        assert.equal(cleanTranscript('(no speech)'), '');
         assert.equal(cleanTranscript('EMPTY'), '');
         console.log('PASS: cleanTranscript normalization');
+    }
+
+    // 4b. isLoopbackAddress accepts full 127.0.0.0/8 + ::1 and rejects LAN IPs
+    {
+        assert.equal(isLoopbackAddress('127.0.0.1'), true);
+        assert.equal(isLoopbackAddress('127.0.1.1'), true);
+        assert.equal(isLoopbackAddress('::1'), true);
+        assert.equal(isLoopbackAddress('::ffff:127.0.0.1'), true);
+        assert.equal(isLoopbackAddress('192.168.1.50'), false);
+        assert.equal(isLoopbackAddress('10.0.0.2'), false);
+        assert.equal(isLoopbackAddress(''), false);
+        console.log('PASS: isLoopbackAddress subnet validation');
     }
 
     // Start test HTTP server with attached voice + CONNECT tunnel in an isolated cert dir
@@ -338,13 +353,114 @@ async function runTests() {
                 await new Promise((resolve) => echoServer.close(resolve));
             }
         }
+
+        // 9. Pipelined early WebSocket frames in upgrade `head` are not dropped
+        {
+            const sock = net.connect(port, '127.0.0.1');
+            await new Promise((resolve, reject) => {
+                sock.once('connect', resolve);
+                sock.once('error', reject);
+            });
+            const wsKey = crypto.randomBytes(16).toString('base64');
+            const upgradeReq = Buffer.from([
+                `GET ${VOICE_STREAM_PATH}?encoding=linear16&sample_rate=16000&channels=1 HTTP/1.1`,
+                `Host: 127.0.0.1:${port}`,
+                'Upgrade: websocket, HTTP/2',
+                'Connection: Upgrade',
+                `Sec-WebSocket-Key: ${wsKey}`,
+                'Sec-WebSocket-Version: 13',
+                '\r\n'
+            ].join('\r\n'));
+            const pipelined = Buffer.concat([
+                upgradeReq,
+                encodeClientFrame(0x2, buildTonePcm(0.4)),
+                encodeClientFrame(0x1, Buffer.from(JSON.stringify({ type: 'CloseStream' })))
+            ]);
+
+            const messages = await new Promise((resolve, reject) => {
+                let upgraded = false;
+                let rawBuf = Buffer.alloc(0);
+                const received = [];
+                const t = setTimeout(() => { sock.destroy(); reject(new Error('Pipelined WS test timed out')); }, 5000);
+                sock.on('data', (chunk) => {
+                    rawBuf = Buffer.concat([rawBuf, chunk]);
+                    if (!upgraded) {
+                        const idx = rawBuf.indexOf('\r\n\r\n');
+                        if (idx === -1) return;
+                        assert.match(rawBuf.subarray(0, idx).toString('utf8'), /^HTTP\/1\.1 101 Switching Protocols/i);
+                        upgraded = true;
+                        rawBuf = rawBuf.subarray(idx + 4);
+                    }
+                    if (upgraded && rawBuf.length > 0) {
+                        const { frames, remaining } = parseServerFrames(rawBuf);
+                        rawBuf = remaining;
+                        for (const f of frames) {
+                            if (f.opcode === 0x1) {
+                                const msg = JSON.parse(f.payload.toString('utf8'));
+                                received.push(msg);
+                                if (msg.type === 'TranscriptEndpoint') {
+                                    clearTimeout(t);
+                                    sock.destroy();
+                                    resolve(received);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                });
+                sock.write(pipelined);
+            });
+            assert.deepEqual(messages.map(m => m.type), ['TranscriptInterim', 'TranscriptText', 'TranscriptEndpoint']);
+            assert.equal(capturedRequests.length, 3);
+            console.log('PASS: pipelined upgrade head frames and multi-token Upgrade header');
+        }
+
+        // 10. GET /api/hello over intercepted CONNECT api.anthropic.com:443 TLS tunnel
+        {
+            const ca = fs.readFileSync(caPath);
+            const rawSocket = net.connect(port, '127.0.0.1');
+            await new Promise((resolve, reject) => {
+                rawSocket.once('connect', resolve);
+                rawSocket.once('error', reject);
+            });
+            rawSocket.write('CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\n\r\n');
+            await new Promise((resolve, reject) => {
+                let buf = '';
+                const onData = (chunk) => {
+                    buf += chunk.toString('utf8');
+                    if (buf.includes('\r\n\r\n')) {
+                        rawSocket.off('data', onData);
+                        resolve();
+                    }
+                };
+                rawSocket.on('data', onData);
+                rawSocket.once('error', reject);
+            });
+            const tlsSocket = tls.connect({ socket: rawSocket, servername: 'api.anthropic.com', ca, rejectUnauthorized: true });
+            await new Promise((resolve, reject) => {
+                tlsSocket.once('secureConnect', resolve);
+                tlsSocket.once('error', reject);
+            });
+            tlsSocket.write('GET /api/hello HTTP/1.1\r\nHost: api.anthropic.com\r\nConnection: close\r\n\r\n');
+            const rawResp = await new Promise((resolve, reject) => {
+                let data = '';
+                tlsSocket.on('data', (c) => { data += c.toString('utf8'); });
+                tlsSocket.on('end', () => resolve(data));
+                tlsSocket.once('error', reject);
+            });
+            assert.match(rawResp, /^HTTP\/1\.1 200 OK/i);
+            assert.match(rawResp, /\{"status":"ok"\}/);
+            tlsSocket.destroy();
+            rawSocket.destroy();
+            console.log('PASS: GET /api/hello over intercepted TLS tunnel');
+        }
     } finally {
         server.closeAllConnections?.();
         await new Promise((resolve) => server.close(resolve));
         fs.rmSync(tempCertDir, { recursive: true, force: true });
     }
 
-    console.log('All 8 voice stream tests passed');
+    console.log('All 11 voice stream tests passed');
 }
 
 runTests()

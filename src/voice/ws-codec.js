@@ -58,7 +58,9 @@ export class WebSocketConnection extends EventEmitter {
         socket.on('data', (chunk) => this._onData(chunk));
         socket.on('end', () => {
             if (!this.closed) {
-                this.close(1000, '');
+                this.closed = true;
+                if (!this.socket.destroyed) this.socket.destroy();
+                this.emit('close', 1006, '');
             }
         });
         socket.on('error', (err) => {
@@ -74,7 +76,9 @@ export class WebSocketConnection extends EventEmitter {
         });
 
         if (head && head.length > 0) {
-            this._onData(head);
+            queueMicrotask(() => {
+                if (!this.closed) this._onData(head);
+            });
         }
     }
 
@@ -199,7 +203,11 @@ export class WebSocketConnection extends EventEmitter {
             return;
         }
 
-        if (opcode === OPCODE_CONTINUATION && this._fragOpcode !== null) {
+        if (opcode === OPCODE_CONTINUATION) {
+            if (this._fragOpcode === null) {
+                this.close(1002, 'Unexpected continuation frame');
+                return;
+            }
             this._fragLength += payload.length;
             if (this._fragLength > MAX_FRAME_PAYLOAD_BYTES) {
                 this.close(1009, 'Message too large');
@@ -237,9 +245,12 @@ export class WebSocketConnection extends EventEmitter {
  */
 export function acceptWebSocket(req, socket, head) {
     const key = req.headers['sec-websocket-key'];
-    const upgrade = (req.headers['upgrade'] || '').toLowerCase();
+    const upgradeTokens = (req.headers['upgrade'] || '')
+        .toLowerCase()
+        .split(',')
+        .map(token => token.trim());
 
-    if (!key || upgrade !== 'websocket') {
+    if (!key || !upgradeTokens.includes('websocket')) {
         socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
         socket.destroy();
         return null;

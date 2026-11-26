@@ -118,11 +118,16 @@ export function cleanTranscript(raw) {
     if (typeof raw !== 'string') return '';
     let text = raw.trim();
     if (!text) return '';
-    // Strip wrapping quotes if the model added them
-    if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    // Strip paired ASCII or Unicode typographic quotes if the model wrapped the transcript
+    if (
+        (text.startsWith('"') && text.endsWith('"')) ||
+        (text.startsWith("'") && text.endsWith("'")) ||
+        (text.startsWith('“') && text.endsWith('”')) ||
+        (text.startsWith('‘') && text.endsWith('’'))
+    ) {
         text = text.slice(1, -1).trim();
     }
-    if (/^(?:\[?silence\]?|\[?no speech\]?|\[?inaudible\]?|empty|none)$/i.test(text)) {
+    if (/^[(\[]?(?:silence|no speech|inaudible|empty|none)\.?[)\]]?$/i.test(text)) {
         return '';
     }
     return text;
